@@ -8,6 +8,10 @@
 #ifndef TCP_HANDLER_H_
 #define TCP_HANDLER_H_
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
@@ -158,5 +162,9 @@ int send_data(char* buffer, int buffer_len);
 int receive_data(char* buffer, int buffer_len);
 
 int close_tcp();
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* TCP_HANDLER_H_ */

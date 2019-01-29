@@ -20,8 +20,10 @@
 char* stoupper(char* s)
 {
 	char* p = s;
-	while (*p = toupper(*p))
+    while ((*p) = toupper(*p))
+    {
 		p++;
+    }
 	return s;
 }
 
@@ -294,7 +296,7 @@ void handle_http_response(FILE* file_fd, char* ret_buffer,
 	EXIT: return;
 }
 
-int main(int argc, char** argv)
+int main2(int argc, char** argv)
 {
 	int send_sock_fd = -1, recv_sock_fd = -1;
 	struct sockaddr_in src_addr, dst_addr;

@@ -4,8 +4,9 @@
  *  Created on: Dec 8, 2015
  *      Author: Praveen
  */
-
+#include <time.h>
 #include "tcp_handler.h"
+
 
 #define STARTING_SEQUENCE 1
 #define TCP_WORD_LENGTH_WITH_NO_OPTIONS 5
@@ -866,13 +867,12 @@ int connect_tcp(int send_fd, int recv_fd, struct sockaddr_in* dst_addr,
 	initialize_mutex(&tcp_state.tcp_state_lock);
 	initialize_mutex(&tcp_state.session_info.send_fd_lock);
 
-	tcp_flags_t flags =
-	{ 0 };
+	tcp_flags_t flags ={ 0 };
 	flags.ack = 1;
 	flags.syn = 1;
 	if (((ret = send_syn()) < 0)
-			|| ((ret = receive_syn_ack_segment(&flags)) < 0) || ((ret =
-					send_ack_segment(0)) < 0))
+            || ((ret = receive_syn_ack_segment(&flags)) < 0) ||
+            ((ret = send_ack_segment(0)) < 0))
 	{
 		printf("Failed to set up TCP Connection!!");
 		ret = -1;
