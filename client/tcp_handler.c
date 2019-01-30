@@ -5,10 +5,11 @@
  *      Author: Praveen
  */
 #include <time.h>
+#include <stdlib.h>
 #include "tcp_handler.h"
 
 
-#define STARTING_SEQUENCE 1
+#define STARTING_SEQUENCE 10*10
 #define TCP_WORD_LENGTH_WITH_NO_OPTIONS 5
 #define HAS_TCP_OPTIONS(ptr) (ptr->doff > TCP_WORD_LENGTH_WITH_NO_OPTIONS)
 #define TCP_OPTION_OFFSET(ptr) ((char*)ptr + (TCP_WORD_LENGTH_WITH_NO_OPTIONS * WORD_LENGTH))
@@ -31,6 +32,21 @@
 		 ( _index + 1) > MAX_BUFFER_SIZE ? 0 : (_index + 1); })
 
 tcp_state__t tcp_state;
+
+
+static inline uint64_t utc_timestamp(){
+#ifdef _WIN32
+    ULARGE_INTEGER large;
+    GetSystemTimeAsFileTime((LPFILETIME)&large);
+    const uint64_t UNIX_TIME_START = 0x019DB1DED53E8000;
+    return (large.QuadPart - UNIX_TIME_START)/10000;
+#else
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)((uint64_t)tv.tv_sec * 1000) + (uint64_t)tv.tv_usec/1000;
+#endif // _WIN32
+}
+
 
 /*
  Generic checksum calculation function
@@ -857,7 +873,7 @@ int connect_tcp(int send_fd, int recv_fd, struct sockaddr_in* dst_addr,
 	bzero(&tcp_state, sizeof(tcp_state__t));
 	tcp_state.max_segment_size = MAX_CLIENT_SEGMENT_SIZE;
 	tcp_state.client_window_size = CLIENT_WINDOW_SIZE;
-	tcp_state.client_next_seq_num = STARTING_SEQUENCE;
+    tcp_state.client_next_seq_num = random(); // STARTING_SEQUENCE;
 	tcp_state.session_info.dst_addr = *dst_addr;
 	tcp_state.session_info.src_addr = *src_addr;
 	tcp_state.session_info.recv_fd = recv_fd;
@@ -942,8 +958,7 @@ int send_data(char* buffer, int buffer_len)
 {
 	int ret = 0;
 	int total_bytes_to_be_sent = buffer_len;
-	tcp_flags_t flags =
-	{ 0 };
+    tcp_flags_t flags = { 0 };
 	flags.psh = 1;
 	flags.ack = 1;
 
