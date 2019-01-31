@@ -51,7 +51,7 @@ static inline uint64_t utc_timestamp(){
 /*
  Generic checksum calculation function
  */
-static unsigned short csum(uint16_t *ptr, unsigned int nbytes)
+unsigned short csum(uint16_t *ptr, unsigned int nbytes)
 {
 	uint32_t sum;
 	uint16_t answer;
@@ -960,7 +960,7 @@ int send_data(char* buffer, int buffer_len)
 	int total_bytes_to_be_sent = buffer_len;
     tcp_flags_t flags = { 0 };
 	flags.psh = 1;
-	flags.ack = 1;
+    flags.ack = 1;
 
 	while (total_bytes_to_be_sent > 0)
 	{

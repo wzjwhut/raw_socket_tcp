@@ -161,6 +161,8 @@ int send_data(char* buffer, int buffer_len);
 
 int receive_data(char* buffer, int buffer_len);
 
+unsigned short csum(uint16_t *ptr, unsigned int nbytes);
+
 int close_tcp();
 
 #ifdef __cplusplus

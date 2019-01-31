@@ -20,8 +20,11 @@ SOURCES += \
         main.cpp \
     tcp_handler.c \
     rawsocket_http.c \
-    routing_table.c
+    routing_table.c \
+    simple_tcp.c
 
 HEADERS += \
     tcp_handler.h \
-    routing_table.h
+    routing_table.h \
+    simple_tcp.h \
+    outstream.h
