@@ -5,7 +5,10 @@
  *      Author: Praveen
  */
 #include <stdlib.h>
-#include "simple_tcp.h"
+#include <unistd.h>
+#include <sys/time.h>
+#include "rawtcp.h"
+#include "routing_table.h"
 
 
 #define STARTING_SEQUENCE 10*10
@@ -31,11 +34,7 @@
 		 ( _index + 1) > MAX_BUFFER_SIZE ? 0 : (_index + 1); })
 
 
-static inline uint64_t utc_timestamp(){
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (uint64_t)((uint64_t)tv.tv_sec * 1000) + (uint64_t)tv.tv_usec/1000;
-}
+static ssize_t receive_data(rawtcp_t* tcp_state);
 
 
 /*
@@ -59,7 +58,7 @@ static unsigned short csum(uint16_t *ptr, unsigned int nbytes)
 
 	sum = (sum >> 16) + (sum & 0xffff);
 	sum = sum + (sum >> 16);
-	answer = (short) ~sum;
+    answer = (unsigned short) ~sum;
 
 	return (answer);
 }
@@ -78,7 +77,7 @@ static void calculate_tcp_checksum(struct tcphdr* tcph,
 	psh.protocol = IPPROTO_TCP;
 	psh.tcp_length = htons(tcphdr_len + tcp_payload_len);
 
-	int psize = sizeof(pseudo_header) + tcphdr_len + tcp_payload_len;
+    size_t psize = sizeof(pseudo_header) + tcphdr_len + tcp_payload_len;
 	pseudogram = malloc(psize);
 
 	bzero(pseudogram, psize);
@@ -191,55 +190,49 @@ static void build_tcp_header(rawtcp_t* tcp_state, struct tcphdr* tcph, tcp_flags
 }
 
 static void build_packet_headers(rawtcp_t* tcp_state, packet_t* packet, int payload_len,
-		tcp_flags_t* flags)
+        tcp_flags_t* flags)
 {
 	struct tcphdr* tcph = (struct tcphdr*) packet->offset[TCP_OFFSET];
 	struct iphdr* iph = (struct iphdr*) packet->offset[IP_OFFSET];
 
-    build_tcp_header(tcp_state, tcph, flags, payload_len);
-	calculate_tcp_checksum(tcph, payload_len,
+    build_tcp_header(tcp_state, tcph, flags, (uint16_t)payload_len);
+    calculate_tcp_checksum(tcph, (uint16_t)payload_len,
             *(uint32_t *) &tcp_state->session_info.src_addr.sin_addr.s_addr,
             *(uint32_t *) &tcp_state->session_info.dst_addr.sin_addr.s_addr);
-    build_ip_header(tcp_state, iph, ((tcph->doff * WORD_LENGTH) + payload_len));
+    build_ip_header(tcp_state, iph, ((tcph->doff * WORD_LENGTH) + (uint16_t)payload_len));
 }
 
-static int send_packet(rawtcp_t* tcp_state, void *buffer, int total_packet_len)
+static ssize_t send_packet(rawtcp_t* tcp_state, void *buffer, size_t total_packet_len)
 {
-	int ret = -1;
-
-	while (total_packet_len > 0)
-	{
-		//Send the packet
-        if ((ret = sendto(tcp_state->session_info.send_fd, buffer,
-				total_packet_len, 0,
-                (struct sockaddr *) &tcp_state->session_info.dst_addr,
-				sizeof(struct sockaddr_in))) < 0)
-		{
-			if (errno == EINTR)
-			{
-				printf("Sendto() Interrupted!!");
-				continue;
-			}
-			else
-			{
-				perror("sendto failed");
-				goto EXIT;
-			}
-		}
-		if (ret == total_packet_len)
-			break;
-
-		total_packet_len -= ret;
-		buffer += ret;
-	}
-    EXIT:
-	return ret;
+    ssize_t ret;
+again:
+    ret = sendto(tcp_state->session_info.send_fd, buffer,
+            total_packet_len, 0,
+            (struct sockaddr *) &tcp_state->session_info.dst_addr,
+            sizeof(struct sockaddr_in)) ;
+    if(ret<0)
+    {
+        if (errno == EINTR)
+        {
+            printf("Sendto() Interrupted!!");
+            goto again;
+        }
+        else
+        {
+            perror("sendto failed");
+            return -1;
+        }
+    }else if ((size_t)ret == total_packet_len){
+        return (int)total_packet_len;
+    }else{
+        return -1;
+    }
 }
 
 
-static int send_ack(rawtcp_t* tcp_state, uint8_t fin)
+static ssize_t send_ack(rawtcp_t* tcp_state, uint8_t fin)
 {
-	int ret = -1;
+    ssize_t ret = -1;
 	packet_t* packet = create_packet();
 	tcp_flags_t flags =
 	{ 0 };
@@ -247,20 +240,18 @@ static int send_ack(rawtcp_t* tcp_state, uint8_t fin)
 	flags.ack = 1;
 	flags.fin = fin;
     build_packet_headers(tcp_state, packet, 0, &flags);
-
-    if ((ret = send_packet(tcp_state, &packet->payload,
-			((struct iphdr*) packet->offset[IP_OFFSET])->tot_len)) < 0)
+    size_t payload_len = ((struct iphdr*) packet->offset[IP_OFFSET])->tot_len;
+    if ((ret = send_packet(tcp_state, &packet->payload,payload_len)) != (ssize_t)payload_len)
 	{
 		printf("Send error!! Exiting.. ");
 	}
-
-	EXIT: destroy_packet(packet);
+    destroy_packet(packet);
 	return ret;
 }
 
-static int receive_packet(rawtcp_t* tcp_state, packet_t *packet)
+static ssize_t receive_packet(rawtcp_t* tcp_state, packet_t *packet)
 {
-	int ret = -1;
+    ssize_t ret = -1;
 	while (1)
 	{
         if ((ret = recvfrom(tcp_state->session_info.recv_fd, &packet->payload,
@@ -270,16 +261,16 @@ static int receive_packet(rawtcp_t* tcp_state, packet_t *packet)
 			if (errno == EINTR)
 				continue;
             else if(errno == EAGAIN || errno == EWOULDBLOCK){
+                //printf("block\n");
                 usleep(100);
                 continue;
             }else{
-				perror("recv failed");
+                perror("recv failed\n");
 				return ret;
 			}
 
 		}
-        printf("recvfrom %d\n", ret);
-		//Data received successfully
+        printf("recvfrom %ld\n", ret);
 		struct iphdr *iph = (struct iphdr *) &packet->payload;
 		if (validate_ip_checksum(iph) < 0)
 		{
@@ -293,8 +284,10 @@ static int receive_packet(rawtcp_t* tcp_state, packet_t *packet)
 
         if (iph->saddr != tcp_state->session_info.dst_addr.sin_addr.s_addr
                 && tcph->dest != tcp_state->session_info.src_port
-                && tcph->source != tcp_state->session_info.dst_port)
-			continue;
+                && tcph->source != tcp_state->session_info.dst_port){
+            continue;
+        }
+
 
         if (validate_tcp_checksum(tcp_state, tcph,
 				(ntohs(iph->tot_len) - iphdr_len - tcphdr_len)) < 0)
@@ -305,11 +298,12 @@ static int receive_packet(rawtcp_t* tcp_state, packet_t *packet)
 
 		if ( IS_DUPLICATE_ACK(tcph))
 		{
-            //handle_packet_retransmission();
+            printf("is duplicate ack");
 			continue;
 		}
 		else if ( IS_DUPLICATE_TCP_SEGMENT(tcph))
 		{
+             printf("is duplicate segment");
             send_ack(tcp_state, 0);
 			continue;
 		}
@@ -332,9 +326,7 @@ static void process_ack(rawtcp_t* tcp_state, struct tcphdr *tcph, uint16_t paylo
             (++tcp_state->cwindow_size > MAX_CONGESTION_WINDOW_SIZE) ?
                     MAX_CONGESTION_WINDOW_SIZE : tcp_state->cwindow_size;
 
-    uint32_t ack = ntohl(tcph->ack_seq);
-    //remove_acked_entries(ntohl(tcph->ack_seq));
-
+    //uint32_t ack = ntohl(tcph->ack_seq);
 	if (HAS_TCP_OPTIONS(tcph))
 	{
 		char* tcp_options_offset = (char*) TCP_OPTION_OFFSET(tcph);
@@ -366,77 +358,76 @@ static void process_ack(rawtcp_t* tcp_state, struct tcphdr *tcph, uint16_t paylo
 }
 
 
-static int send_tcp_segment(rawtcp_t* tcp_state, packet_t* packet)
+
+static ssize_t send_flags(rawtcp_t* tcp, tcp_flags_t* flags)
 {
-	int ret = 0;
-
-    if ((ret = send_packet(tcp_state, &packet->payload,
-			((struct iphdr*) packet->offset[IP_OFFSET])->tot_len)) < 0)
-	{
-		printf("Send error!! Exiting.. ");
-		goto EXIT;
-	}
-
-	EXIT: return ret;
-}
-
-static int send_syn(rawtcp_t* tcp_state)
-{
-	int ret = -1;
 	packet_t* packet = create_packet();
-	tcp_flags_t flags =
-	{ 0 };
-
-	flags.syn = 1;
-    build_packet_headers(tcp_state, packet, 0, &flags);
-    tcp_state->tcp_current_state = SYN_SENT;
-
-    return send_tcp_segment(tcp_state, packet);
-}
-
-static int receive_syn_ack(rawtcp_t* tcp_state, tcp_flags_t* flags)
-{
-	int ret = -1;
-	packet_t* packet = create_packet();
-	struct tcphdr *tcph;
-
-	while (1)
-	{
-        if ((ret = receive_packet(tcp_state, packet)) < 0)
-		{
-			printf("Receive error!! Exiting.. ");
-			goto EXIT;
-		}
-        printf("[receive_syn_ack] received packet");
-		tcph = (struct tcphdr *) packet->offset[TCP_OFFSET];
-
-        if (tcph->ack == flags->ack && tcph->syn == flags->syn){
-			break;
+    build_packet_headers(tcp, packet, 0, flags);
+    ssize_t ret = 0;
+    int trycount = 0;
+    uint32_t rrt = 0;
+    ret = -1;
+    do{
+        uint32_t expected_ack_seq = tcp->last_acked_seq_num + 1;
+        if ((ret = send_packet(tcp, &packet->payload,
+                ((struct iphdr*) packet->offset[IP_OFFSET])->tot_len)) < 0)
+        {
+            printf("[send_tcp_segment] send_packet error!!\n");
+            goto EXIT;
         }
-
-        if (tcph->rst || !tcp_state->syn_retries)
-		{
-			ret = -1;
-			goto EXIT;
-		}
-	}
-
-    process_ack(tcp_state, tcph, 1);
-
-	EXIT: destroy_packet(packet);
-	return ret;
+        usleep(10*1000 + rrt);
+        rrt += (rrt==0)?(600*1000):rrt;
+        if(receive_data(tcp)<0){
+            printf("[send_tcp_segment] receive_data error\n");
+            goto EXIT;
+        }
+        if(tcp->last_acked_seq_num == expected_ack_seq){
+            printf("send segment success\n");
+            ret = 0;
+            break;
+        }else{
+            printf("[send_flags] not invalid seq, expected: %u, but: %u\n", expected_ack_seq, tcp->last_acked_seq_num);
+        }
+    }while(trycount++<5);
+EXIT:
+    return ret;
 }
 
-static int receive_data(rawtcp_t* tcp_state)
+static const char hexdig[] = "0123456789abcdef";
+static void log_hex(const char* tag, unsigned char* data, int len){
+    char msg[50], *ptr;
+    int i;
+    ptr = msg;
+
+    printf("%s\r\n", tag);
+    for(i=0; i<len; i++) {
+        *ptr++ = hexdig[0x0f & (data[i] >> 4)];
+        *ptr++ = hexdig[0x0f & data[i]];
+        if ((i & 0x0f) == 0x0f) {
+            *ptr = '\0';
+            ptr = msg;
+            printf("%s\r\n", msg);
+        } else {
+            *ptr++ = ' ';
+        }
+    }
+    if (i & 0x0f) {
+        *ptr = '\0';
+        printf("%s\r\n", msg);
+    }
+}
+
+
+static ssize_t receive_data(rawtcp_t* tcp_state)
 {
-    int ret = -1;
+    ssize_t ret = -1;
     packet_t* packet = create_packet();
     struct tcphdr* tcph = NULL;
     struct iphdr* iph = NULL;
 
     if ((ret = receive_packet(tcp_state, packet)) < 0)
     {
-        printf("Receive error!! Exiting.. ");
+        printf("Receive error!! Exiting.. \n");
         goto EXIT;
     }
 
@@ -447,168 +438,97 @@ static int receive_data(rawtcp_t* tcp_state)
     uint32_t seq = ntohl(tcph->seq);
     uint32_t ack_seq = ntohl(tcph->ack_seq);
 
-    tcp_state->last_acked_seq_num = ack_seq;
-    tcp_state->server_next_seq_num = seq + packet->payload_len;
-
     if (tcph->rst)
     {
-        printf("received RST");
+        printf("[receive_data] received RST\n");
+        send_ack(tcp_state, 0);
+        tcp_state->tcp_read_end_closed = 1;
+        tcp_state->tcp_write_end_closed = 1;
+        tcp_state->tcp_current_state = CLOSED;
         ret = -1;
         goto EXIT;
     }
 
-    if (seq != (tcp_state->server_next_seq_num))
-    {
+    if (packet->payload_len){
+        printf("has payload copy it, %d\n", packet->payload_len);
+        uint8_t* payload = packet->offset[DATA_OFFSET];
+        outstream_writebuf(&tcp_state->outstream, payload, packet->payload_len);
+        //log_hex("payload", packet->payload, packet->payload_len);
+    }
+
+    if(tcph->fin){
+        printf("[receive_data] received Fin\n");
+        ret = -1;
+        if (tcp_state->tcp_current_state & ESTABLISHED)
+        {
+            process_ack(tcp_state, tcph, 1);
+            send_ack(tcp_state, 1);
+            tcp_state->tcp_current_state = CLOSE_WAIT;
+            tcp_state->tcp_read_end_closed = 1;
+        }
+        else if(tcp_state->tcp_current_state & FIN_WAIT_1)
+        {
+            if(tcph->ack && seq == tcp_state->server_next_seq_num){
+                //received fin and ack
+                process_ack(tcp_state, tcph, 1);
+                send_ack(tcp_state, 0);
+                tcp_state->tcp_read_end_closed = 1;
+                //TIME_WAIT is managered by os. application cannnot controll it.
+                //SO just set CLOSED.
+                tcp_state->tcp_current_state = CLOSED;
+            }else{
+                //received fin, but no ack
+                process_ack(tcp_state, tcph, 1);
+                send_ack(tcp_state, 0);
+                tcp_state->tcp_read_end_closed = 1;
+                tcp_state->tcp_current_state = CLOSING;
+            }
+        }
+        else if (tcp_state->tcp_current_state & FIN_WAIT_2)
+        {
+            process_ack(tcp_state, tcph, 1);
+            send_ack(tcp_state, 0);
+            tcp_state->tcp_read_end_closed = 1;
+            tcp_state->tcp_current_state = CLOSED;
+        }else{
+            //impossible.
+            printf("impossible state: %d\n", tcp_state->tcp_current_state);
+        }
+    }else if(tcph->syn && tcph->ack && (tcp_state->tcp_current_state & SYN_SENT)){
+        printf("[receive_data] received Sync\n");
+        process_ack(tcp_state, tcph, 1);
         send_ack(tcp_state, 0);
+        tcp_state->tcp_current_state = ESTABLISHED;
+        ret = 0;
+    }else if(tcph->psh){
+        printf("[receive_data] received Push, flag: %d,  payload len: %d\n", tcph->psh, packet->payload_len);
+        process_ack(tcp_state, tcph, packet->payload_len);
+        if ( ((tcp_state->tcp_current_state & CLOSING)
+                || (tcp_state->tcp_current_state & LAST_ACK)) && seq == tcp_state->server_next_seq_num)
+        {
+            ret = -1;
+            tcp_state->tcp_current_state = CLOSED;
+        }else if ( (tcp_state->tcp_current_state & FIN_WAIT_1)  && seq == tcp_state->server_next_seq_num ){
+            ret = -1;
+            tcp_state->tcp_current_state = FIN_WAIT_2;
+        }else{
+            ret = 0;
+        }
+        send_ack(tcp_state, 0);
+    }else if(tcph->ack){
+         printf("[receive_data] received ack\n");
+         process_ack(tcp_state, tcph, packet->payload_len);
+         send_ack(tcp_state, 0);
     }
-
-    if(packet->payload_len>0){
-        tcp_state->server_next_seq_num = seq + packet->payload_len;
-        //copy content;
-    }
-
-    //process_ack(tcp_state, tcph, 1);
-
 EXIT:
     destroy_packet(packet);
     return ret;
 }
 
 
-static void get_wait_time(struct timespec* timeToWait, uint16_t timeInSeconds)
-{
-	struct timeval now;
-	int rt;
-	gettimeofday(&now, NULL);
-	timeToWait->tv_sec = now.tv_sec + timeInSeconds;
-	timeToWait->tv_nsec = 0;
-}
-
-
-static void handle_received_data(rawtcp_t* tcp_state, packet_t* packet)
-{
-    tcp_state->client_window_size -= packet->payload_len;
-    tcp_state->client_window_size =
-            (tcp_state->client_window_size < 0) ?
-                    0 : tcp_state->client_window_size;
-    tcp_state->recv_info.recv_buffer[tcp_state->recv_info.recv_buffer_tail].packet =
-			packet;
-
-    if ( WRAP_ROUND_BUFFER_SIZE(tcp_state->recv_info.recv_buffer_tail)
-         == tcp_state->recv_info.recv_buffer_head){
-
-    }
-
-
-    tcp_state->recv_info.recv_buffer_tail =
-    WRAP_ROUND_BUFFER_SIZE(tcp_state->recv_info.recv_buffer_tail);
-}
-
-static void tcp_recv_handler(rawtcp_t* tcp_state)
-{
-	packet_t* packet = NULL;
-	struct tcphdr* tcph = NULL;
-	struct iphdr* iph = NULL;
-	int ret = 0;
-
-	while (1)
-	{
-		packet = create_packet();
-        if ((ret = receive_packet(tcp_state, packet)) < 0)
-		{
-			printf("Receive error!! Exiting.. ");
-			continue;
-		}
-
-		tcph = (struct tcphdr*) packet->offset[TCP_OFFSET];
-		iph = (struct iphdr*) packet->offset[IP_OFFSET];
-
-        if (ntohl(tcph->seq) != (tcp_state->server_next_seq_num))
-		{
-            send_ack(tcp_state, 0);
-			destroy_packet(packet);
-			continue;
-		}
-
-		uint16_t payload_len = ntohs(iph->tot_len) - (iph->ihl * WORD_LENGTH)
-				- (tcph->doff * WORD_LENGTH);
-
-		if (tcph->rst)
-		{
-            send_ack(tcp_state, 0);
-            tcp_state->tcp_read_end_closed = 1;
-            tcp_state->tcp_write_end_closed = 1;
-            tcp_state->tcp_current_state = CLOSED;
-			break;
-		}
-
-		if (packet->payload_len)
-            handle_received_data(tcp_state, packet);
-
-        if (tcph->fin && (tcp_state->tcp_current_state & ESTABLISHED))
-		{
-            process_ack(tcp_state, tcph, 1);
-            send_ack(tcp_state, 0);
-            tcp_state->tcp_current_state = CLOSE_WAIT;
-            tcp_state->tcp_read_end_closed = 1;
-			continue;
-		}
-		else if (tcph->fin && tcph->ack
-                && (tcp_state->tcp_current_state & FIN_WAIT_1))
-		{
-            process_ack(tcp_state, tcph, 1);
-            send_ack(tcp_state, 0);
-            tcp_state->tcp_read_end_closed = 1;
-            tcp_state->tcp_current_state = CLOSED;
-			break;
-		}
-        else if (tcph->fin && (tcp_state->tcp_current_state & FIN_WAIT_1))
-		{
-            process_ack(tcp_state, tcph, 1);
-            send_ack(tcp_state, 0);
-            tcp_state->tcp_read_end_closed = 1;
-            tcp_state->tcp_current_state = CLOSING;
-			continue;
-		}
-        else if (tcph->fin && (tcp_state->tcp_current_state & FIN_WAIT_2))
-		{
-            process_ack(tcp_state, tcph, 1);
-            send_ack(tcp_state, 0);
-            tcp_state->tcp_read_end_closed = 1;
-            tcp_state->tcp_current_state = CLOSED;
-			break;
-		}
-
-        process_ack(tcp_state, tcph, payload_len);
-
-		if (packet->payload_len == 0)
-		{
-			destroy_packet(packet);
-
-            if ((tcp_state->tcp_current_state & CLOSING)
-                    || (tcp_state->tcp_current_state & LAST_ACK))
-			{
-                tcp_state->tcp_current_state = CLOSED;
-                break;
-			}
-
-            if (tcp_state->tcp_current_state & FIN_WAIT_1)
-                tcp_state->tcp_current_state = FIN_WAIT_2;
-
-			continue;
-		}
-
-        send_ack(tcp_state, 0);
-	}
-
-	return NULL;
-}
-
-
-//Blocking call
 rawtcp_t* rawtcp_connect(const char* dest_ip, int dst_port)
 {
-	int ret = 0;
+    ssize_t ret = 0;
     int send_sock_fd = -1, recv_sock_fd = -1;
 
     struct hostent *host_details = NULL;
@@ -672,110 +592,84 @@ rawtcp_t* rawtcp_connect(const char* dest_ip, int dst_port)
         return NULL;
     }
 
-    rawtcp_t* tcp_state = (rawtcp_t*)malloc(sizeof(rawtcp_t));
-
-// Initialize the TCP Session State with the given details
-    bzero(tcp_state, sizeof(rawtcp_t));
-    tcp_state->max_segment_size = MAX_CLIENT_SEGMENT_SIZE;
-    tcp_state->client_window_size = CLIENT_WINDOW_SIZE;
-    tcp_state->client_next_seq_num = random(); // STARTING_SEQUENCE;
-    tcp_state->session_info.dst_addr = dst_addr;
-    tcp_state->session_info.src_addr = src_addr;
-    tcp_state->session_info.recv_fd = recv_sock_fd;
-    tcp_state->session_info.send_fd = send_sock_fd;
-    tcp_state->syn_retries = 5;
-    tcp_state->cwindow_size = 1;
+    rawtcp_t* tcp = (rawtcp_t*)malloc(sizeof(rawtcp_t));
+    bzero(tcp, sizeof(rawtcp_t));
+    tcp->max_segment_size = MAX_CLIENT_SEGMENT_SIZE;
+    tcp->client_window_size = CLIENT_WINDOW_SIZE;
+    tcp->client_next_seq_num = (uint32_t)random(); // STARTING_SEQUENCE;
+    tcp->last_acked_seq_num = tcp->client_next_seq_num;
+    tcp->session_info.dst_addr = dst_addr;
+    tcp->session_info.src_addr = src_addr;
+    tcp->session_info.recv_fd = recv_sock_fd;
+    tcp->session_info.send_fd = send_sock_fd;
+    tcp->syn_retries = 5;
+    tcp->cwindow_size = 1;
+    tcp->tcp_current_state = SYN_SENT;
 
 	tcp_flags_t flags ={ 0 };
-	flags.ack = 1;
-	flags.syn = 1;
-    if (((ret = send_syn(tcp_state)) < 0)
-            || ((ret = receive_syn_ack(tcp_state, &flags)) < 0) ||
-            ((ret = send_ack(tcp_state, 0)) < 0))
-	{
-		printf("Failed to set up TCP Connection!!");
-		ret = -1;
-        goto EXIT;
+    flags.syn = 1;
+    flags.ack = 0;
+    send_flags(tcp, &flags);
+    if(tcp->tcp_current_state == ESTABLISHED){
+        printf("[rawtcp_connect] tcp connected");
+        return tcp;
+    }else{
+        printf("[rawtcp_connect] Failed to set up TCP Connection!!\n");
+        close(send_sock_fd);
+        close(recv_sock_fd);
+        FREEIF(tcp->outstream.data);
+        return NULL;
 	}
 
-    tcp_state->tcp_current_state = ESTABLISHED;
-    return tcp_state;
+}
 
-EXIT:
-    if(tcp_state != NULL){
-        free(tcp_state);
+
+void rawtcp_close(rawtcp_t* tcp)
+{
+    if(tcp == NULL){
+        return;
     }
-    return NULL;
-}
-
-static int send_fin(rawtcp_t* tcp_state)
-{
-	int ret = -1;
-	packet_t* packet = create_packet();
-	tcp_flags_t flags =
-	{ 0 };
-
-	flags.fin = 1;
-	flags.ack = 1;
-    build_packet_headers(tcp_state, packet, 0, &flags);
-
-    return send_tcp_segment(tcp_state, packet);
-}
-
-int rawtcp_close(rawtcp_t* tcp_state)
-{
-	int ret = -1;
-
-    if (!((tcp_state->tcp_current_state & ESTABLISHED)
-            || (tcp_state->tcp_current_state & CLOSE_WAIT)))
-	{
-		goto EXIT;
-	}
-
-    if ((ret = send_fin(tcp_state)) < 0)
-		goto EXIT;
-
-	struct timespec timeToWait;
-	get_wait_time(&timeToWait, 10);
-    if (tcp_state->tcp_current_state & ESTABLISHED)
-        tcp_state->tcp_current_state = FIN_WAIT_1;
-	else
-        tcp_state->tcp_current_state = LAST_ACK;
+    tcp_flags_t flags = {0};
+    flags.fin = 1;
+    flags.ack = 1;
+    send_flags(tcp, &flags);
     usleep(10*1000);
-    tcp_state->tcp_write_end_closed = 1;
-	EXIT: return ret;
+    tcp->tcp_write_end_closed = 1;
+    close(tcp->recv_fd);
+    close(tcp->send_fd);
+    FREEIF(tcp->outstream.data);
+    free(tcp);
 }
 
-int rawtcp_send(rawtcp_t* tcp_state, char* buffer, int buffer_len)
+/**
+ * @brief rawtcp_send
+ * @param tcp_state
+ * @param buffer
+ * @param buffer_len
+ * @return return 0 if success, -1 if failed
+ */
+int rawtcp_send(rawtcp_t* tcp_state, const char* buffer, size_t buffer_len)
 {
     printf("rawtcp_send\n");
-	int ret = 0;
-	int total_bytes_to_be_sent = buffer_len;
+    int ret = -1;
+    size_t total_bytes_to_be_sent = buffer_len;
     tcp_flags_t flags = { 0 };
 	flags.psh = 1;
     flags.ack = 1;
 
 	while (total_bytes_to_be_sent > 0)
 	{
-        if (tcp_state->tcp_write_end_closed)
-		{
-			printf("TCP Client Closed!!\n");
-			ret = -1;
-			break;
-		}
-
 		packet_t* packet = create_packet();
-		packet->payload_len =
-                total_bytes_to_be_sent > tcp_state->max_segment_size ?
-                        tcp_state->max_segment_size : total_bytes_to_be_sent;
-
+        packet->payload_len = total_bytes_to_be_sent > tcp_state->max_segment_size ?
+                    tcp_state->max_segment_size : (uint16_t)total_bytes_to_be_sent;
 		memcpy(packet->offset[DATA_OFFSET], buffer, packet->payload_len);
         build_packet_headers(tcp_state, packet, packet->payload_len, &flags);
 
-        int rrt = 600; //ms
-        while(1){
-            uint32_t snd_seq = tcp_state->last_acked_seq_num;
-            uint32_t ack_seq = tcp_state->last_acked_seq_num + packet->payload_len;
+        int trycount = 0;
+        uint32_t rrt = 0;
+        ret = -1;
+        do{
+            uint32_t expected_ack_seq = tcp_state->last_acked_seq_num + packet->payload_len;
             if ((ret = send_packet(tcp_state, &packet->payload,
                     ((struct iphdr*) packet->offset[IP_OFFSET])->tot_len)) < 0)
             {
@@ -783,30 +677,51 @@ int rawtcp_send(rawtcp_t* tcp_state, char* buffer, int buffer_len)
                 goto EXIT;
             }
             usleep(10*1000 + rrt);
-            rrt *= 2;
+            rrt += (rrt==0)?(600*1000):rrt;
             receive_data(tcp_state);
-            if(tcp_state->last_acked_seq_num == ack_seq){
-                printf("received ack\n");
+            if(tcp_state->last_acked_seq_num == expected_ack_seq){
+                printf("send segment success\n");
+                ret = 0;
                 break;
             }else{
                 printf("not invalid seq");
             }
+        }while(trycount++<5);
+
+        if(ret == -1){
+            goto EXIT;
         }
 		total_bytes_to_be_sent -= packet->payload_len;
-		ret += packet->payload_len;
 	}
-
 EXIT:
     return ret;
 }
 
-static void release_and_update_recv_buffer(rawtcp_t* tcp_state, packet_t* packet)
-{
+#ifndef MIN
+#define MIN(a, b) ((a)<(b))?(a):(b)
+#endif
 
-    tcp_state->recv_info.recv_buffer[tcp_state->recv_info.recv_buffer_head].packet =
-	NULL;
-    tcp_state->recv_info.recv_buffer_head =
-    WRAP_ROUND_BUFFER_SIZE(tcp_state->recv_info.recv_buffer_head);
-	destroy_packet(packet);
+int rawtcp_recv(rawtcp_t* tcp, char* buffer, int buffer_len){
+    if(tcp->outstream.data_len<=0){
+        if(tcp->tcp_current_state != ESTABLISHED){
+            printf("tcp closed\n");
+            return -1;
+        }else{
+            receive_data(tcp);
+           return 0;
+        }
+    }else{
+        int minsize = MIN(buffer_len, tcp->outstream.data_len);
+        int remain = tcp->outstream.data_len - minsize;
+        printf("copy data out, %d, remain: %d\n", minsize, remain);
+        memcpy(buffer, tcp->outstream.data, minsize);
+        tcp->outstream.data_len = remain;
+        if(remain>0){
+            memmove(tcp->outstream.data, tcp->outstream.data + minsize, remain);
+        }
+        return minsize;
+    }
 }
+
+
 

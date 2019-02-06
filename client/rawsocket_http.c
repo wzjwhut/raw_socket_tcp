@@ -20,7 +20,7 @@
 char* stoupper(char* s)
 {
 	char* p = s;
-    while ((*p) = toupper(*p))
+    while (((*p) = (char)toupper(*p)))
     {
 		p++;
     }

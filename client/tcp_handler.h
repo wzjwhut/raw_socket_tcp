@@ -56,7 +56,7 @@ typedef enum
 	CLOSING = 32,
 	LAST_ACK = 64,
 	CLOSED = 128
-} tcp_state_machine_t;
+} tcp_state_t;
 
 typedef struct
 {
@@ -151,7 +151,7 @@ typedef struct
 	uint8_t tcp_write_end_closed;
 	uint8_t tcp_read_end_closed;
 	pthread_t tcp_worker_threads[2];
-	tcp_state_machine_t tcp_current_state;
+	tcp_state_t tcp_current_state;
 } tcp_state__t;
 
 int connect_tcp(int send_fd, int recv_fd, struct sockaddr_in* dst_addr,

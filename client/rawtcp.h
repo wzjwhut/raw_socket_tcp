@@ -55,7 +55,7 @@ typedef enum
     CLOSING = 32,
     LAST_ACK = 64,
     CLOSED = 128
-} tcp_state_machine_t;
+} tcp_state_t;
 
 typedef struct
 {
@@ -79,11 +79,6 @@ typedef struct
     uint16_t payload_len;
 } packet_t;
 
-typedef struct
-{
-    packet_t* packet;
-    uint32_t packet_seq;
-} buffered_packet_t;
 
 typedef struct
 {
@@ -104,22 +99,6 @@ typedef struct
     int recv_fd;
 } session_info__t;
 
-typedef struct
-{
-    buffered_packet_t send_buffer[MAX_BUFFER_SIZE];
-    uint16_t send_buffer_head;
-    uint16_t send_buffer_tail;
-    buffered_packet_t retx_buffer[MAX_BUFFER_SIZE];
-    uint16_t retx_buffer_head;
-    uint16_t retx_buffer_tail;
-} tcp_send_data_t;
-
-typedef struct
-{
-    buffered_packet_t recv_buffer[MAX_BUFFER_SIZE];
-    uint16_t recv_buffer_head;
-    uint16_t recv_buffer_tail;
-} tcp_recv_data_t;
 
 typedef struct
 {
@@ -133,20 +112,18 @@ typedef struct
     uint16_t cwindow_size;
     uint16_t ssthresh;
     uint8_t syn_retries;
-    tcp_send_data_t sender_info;
-    tcp_recv_data_t recv_info;
     uint8_t tcp_write_end_closed;
     uint8_t tcp_read_end_closed;
     outstream_t outstream;
-    tcp_state_machine_t tcp_current_state;
+    tcp_state_t tcp_current_state;
     int send_fd;
     int recv_fd;
 } rawtcp_t;
 
 rawtcp_t* rawtcp_connect(const char* dest_ip, int dst_port);
-int rawtcp_send(rawtcp_t* tcp, char* buffer, int buffer_len);
+int rawtcp_send(rawtcp_t* tcp, const char* buffer, size_t buffer_len);
 int rawtcp_recv(rawtcp_t* tcp, char* buffer, int buffer_len);
-int rawtcp_close(rawtcp_t* tcp);
+void rawtcp_close(rawtcp_t* tcp);
 
 #ifdef __cplusplus
 }
