@@ -674,7 +674,7 @@ int rawtcp_send(rawtcp_t* tcp_state, const char* buffer, size_t buffer_len)
                     ((struct iphdr*) packet->offset[IP_OFFSET])->tot_len)) < 0)
             {
                 printf("Send error!! Exiting..\n");
-                goto EXIT;
+                break;
             }
             usleep(10*1000 + rrt);
             rrt += (rrt==0)?(600*1000):rrt;
@@ -687,7 +687,7 @@ int rawtcp_send(rawtcp_t* tcp_state, const char* buffer, size_t buffer_len)
                 printf("not invalid seq");
             }
         }while(trycount++<5);
-
+        destroy_packet(packet);
         if(ret == -1){
             goto EXIT;
         }
